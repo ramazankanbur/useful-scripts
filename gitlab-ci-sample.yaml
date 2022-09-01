@@ -1,0 +1,87 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event' && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'dev' || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'preprod' || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main')
+    #- if: $CI_PIPELINE_SOURCE == 'web' #pipeline can be triggered from web only
+    
+variables:
+  WEB_PUBLISH_DIRECTORY: $CI_PROJECT_DIR/src/app/bin/Release/net6.0/publish
+  DESKTOP_PUBLISH_DIRECTORY: $CI_PROJECT_DIR/src/app/bin/Desktop
+  SCRIPTS_PATH: C:/GR/Scripts
+
+stages:
+  - build
+  - publish-web
+  - deploy-web
+  - publish-desktop
+  - distribute-setup-file
+  
+
+build:
+  tags:
+    - md2tjznc
+  stage: build
+  script: 
+    - Set-Location  $CI_PROJECT_DIR/src/app
+    - dotnet build --configuration Release
+
+publish web:
+  tags:
+    - md2tjznc
+  stage: publish-web
+  variables:
+    GIT_CLEAN_FLAGS: none
+  script:
+    - Set-Location $CI_PROJECT_DIR/src/app
+    - dotnet publish -c Release --no-build 
+  after_script:
+    - $WEB_ARTIFACTS = powershell $SCRIPTS_PATH\get-variable-by-env.ps1 $SCRIPTS_PATH\env\${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.txt WEB_ARTIFACTS 
+    - Invoke-Expression "& '7z' a $WEB_ARTIFACTS\StyleEditor.zip $WEB_PUBLISH_DIRECTORY\* '-xr!*.exe' '-xr!*.pdb' '-xr!*.Development.json'"
+
+deploy web:
+  tags:
+    - md2tjznc
+  variables:
+    GIT_CLEAN_FLAGS: none
+    RESOURCE_GROUP: rg-resource-group
+  stage: deploy-web
+  script:
+    - $WEB_APP = powershell $SCRIPTS_PATH\get-variable-by-env.ps1 $SCRIPTS_PATH\env\${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.txt WEB_APP 
+    - $WEB_ARTIFACTS = powershell $SCRIPTS_PATH\get-variable-by-env.ps1 $SCRIPTS_PATH\env\${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.txt WEB_ARTIFACTS 
+    - az webapp deploy --resource-group $RESOURCE_GROUP --name $WEB_APP --src-path "${WEB_ARTIFACTS}\StyleEditor.zip" --type zip --async true
+
+publish desktop:
+  tags:
+    - md2tjznc
+  stage: publish-desktop
+  rules:
+    # create setup file only when merged preprod and prod or merge dev and triggered pipeline from web
+    - if: ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'dev' && $CI_PIPELINE_SOURCE == 'web') || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'preprod' ||  $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'
+  variables:
+    GIT_CLEAN_FLAGS: none
+  script:
+    - Set-Location $CI_PROJECT_DIR/src/app
+    - powershell $SCRIPTS_PATH\hide-login-icon.ps1
+    - electronize build /target win
+
+distribute setup file:
+  tags: 
+    - md2tjznc
+  stage: distribute-setup-file
+  rules:
+    # create setup file only when merged preprod and prod or merge dev and triggered pipeline from web
+    - if: ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'dev' && $CI_PIPELINE_SOURCE == 'web') || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'preprod' ||  $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main'
+  variables:
+    GIT_CLEAN_FLAGS: none
+    STORAGE_ACCOUNT_NAME: storageAccount
+    BLOB_URL: https://storageAccount.blob.core.windows.net/
+    
+  script:
+    - $ARTIFACT_DIRECTORY = powershell $SCRIPTS_PATH\get-variable-by-env.ps1 $SCRIPTS_PATH\env\${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.txt ARTIFACT_DIRECTORY 
+    - New-Item -ItemType Directory -Force -Path $CI_PROJECT_DIR\$ARTIFACT_DIRECTORY
+    - Copy-Item -Path $DESKTOP_PUBLISH_DIRECTORY\*.exe -Destination $CI_PROJECT_DIR\$ARTIFACT_DIRECTORY\ -Verbose
+    - Invoke-Expression "& '7z' a $CI_PROJECT_DIR\desktop_artifact\StyleEditorDesktop.zip $CI_PROJECT_DIR\$ARTIFACT_DIRECTORY\*"
+    - Remove-Item -LiteralPath $CI_PROJECT_DIR\$ARTIFACT_DIRECTORY -Force -Recurse
+  after_script:
+    - $BLOB_CONTAINER = powershell $SCRIPTS_PATH\get-variable-by-env.ps1 $SCRIPTS_PATH\env\${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}.txt BLOB_CONTAINER 
+    # sas token comes from storage account > Shared Access Signuture > SAS Token // this token will expire 24.08.2024
+    - az storage blob upload-batch --account-name $STORAGE_ACCOUNT_NAME -s $CI_PROJECT_DIR\desktop_artifact -d $BLOB_URL$BLOB_CONTAINER --sas-token '"token"'
