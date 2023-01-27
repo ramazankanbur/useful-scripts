@@ -2,6 +2,7 @@ workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event' && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'dev' || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'preprod' || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == 'main')
     #- if: $CI_PIPELINE_SOURCE == 'web' #pipeline can be triggered from web only
+    #- if: $CI_COMMIT_BEFORE_SHA != "0000000000000000000000000000000000000000"
     
 variables:
   WEB_PUBLISH_DIRECTORY: $CI_PROJECT_DIR/src/app/bin/Release/net6.0/publish
@@ -10,6 +11,7 @@ variables:
 
 stages:
   - build
+  - unit-tests
   - publish-web
   - deploy-web
   - publish-desktop
@@ -23,6 +25,37 @@ build:
   script: 
     - Set-Location  $CI_PROJECT_DIR/src/app
     - dotnet build --configuration Release
+
+unit-tests:
+  tags:
+    - md2tjznc
+  stage: unit-tests
+  variables:
+    CONFIGURATION: "Debug"
+    COVERAGE_FLAG: "XPlat Code Coverage"
+    REPORT_DIR: '$CI_PROJECT_DIR\cobertura'
+    RESULT_DIR: '$CI_PROJECT_DIR\junit\junit-test-result.xml'
+    LOGGER_FLAG: 'junit;LogFilePath=$CI_PROJECT_DIR\\junit\\junit-test-result.xml;MethodFormat=Class;FailureBodyFormat=Verbose;'
+  script: 
+    - Set-Location  $CI_PROJECT_DIR/src
+    - 'dotnet test
+            -c $CONFIGURATION
+            -r $REPORT_DIR
+            --collect:$COVERAGE_FLAG
+            --test-adapter-path:.
+            --logger:$LOGGER_FLAG'
+    - powershell $SCRIPTS_PATH\print-dotnet-coverage.ps1 $CI_PROJECT_DIR\cobertura  
+  coverage: /TOTAL_COVERAGE=(\d+.\d+)/
+  artifacts:
+    paths:
+      - $REPORT_DIR\*\coverage.cobertura.xml
+      - $RESULT_DIR
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: $REPORT_DIR\*\coverage.cobertura.xml
+      junit: $RESULT_DIR
+
 
 publish web:
   tags:
